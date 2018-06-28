@@ -13,7 +13,7 @@ namespace FortifyAPI.Service
     public class HpeFortifyService
     {
         #region Constants
-        private const string HpeUrlRoot = "https://api.ams.fortify.com";// "https://api.hpfod.com/api/v3/";
+        private const string HpeUrlRoot = "https://api.ams.fortify.com";
         private const string ReleasesEndpoint = "/api/v3/releases";
         private const string ReleaseVulnerabilitiesEndpoint = "/api/v3/releases/{0}/vulnerabilities";
         private const string ReleaseVulnerabilityDetailEndpoint = "/api/v3/releases/{0}/vulnerabilities/{1}/details";
@@ -41,7 +41,7 @@ namespace FortifyAPI.Service
         protected string ClientId { get; set; }
         protected string ClientSecret { get; set; }
         protected string UrlRoot { get; set; } = HpeUrlRoot;
-        protected string AuthToken { get; set; }
+        protected HpeAuthResponse AuthResponse { get; set; }
         #endregion
 
         #region Constructor
@@ -59,85 +59,18 @@ namespace FortifyAPI.Service
         public HpeFortifyService(string clientId, string clientSecret, string authToken)
             : this(clientId, clientSecret)
         {
-            AuthToken = authToken;
+            AuthResponse.access_token = authToken;
         }
         #endregion
 
         #region Public Methods
-        public async Task<HpeRelease> GetLatestRelease()
-        {
-            await VerifyLoggedIn();
 
-            var releases = await GetReleases(ReleasesEndpoint);
-
-            return releases.items.OrderByDescending(r => r.releaseId).FirstOrDefault();
-        }
-
-        public async Task<IList<HpeVulnerability>> GetCurrentVulnerabilities(DateTime? createdSince)
-        {
-            IList<HpeVulnerability> vulnerabilityLists = new List<HpeVulnerability>();
-
-            await VerifyLoggedIn();
-
-            var release = await GetLatestRelease();
-
-            var releaseEndpoint = String.Format(ReleaseVulnerabilitiesEndpoint, release.releaseId);
-
-            var vulnerabilitiesResponse = await GetVulnerabilities(releaseEndpoint, createdSince); // TODO Implement filter - not supported by HPE yet.
-
-            return vulnerabilitiesResponse.items;
-        }
-
-        public async Task<IList<HpeVulnerability>> GetVulnerabilityDetails(IList<HpeVulnerability> vulnerabilities)
-        {
-            foreach (var vulnerability in vulnerabilities)
-            {
-                vulnerability.Details = await GetVulnerabilityDetail(vulnerability.releaseId, vulnerability.vulnId);
-            }
-
-            return vulnerabilities;
-        }
-
-        public async Task<HpeVulnerabilityDetail> GetVulnerabilityDetail(int releaseId, string vulnerabilityId)
-        {
-            await VerifyLoggedIn();
-
-            HpeVulnerabilityDetail detailResponse = null;
-            var path = String.Format(ReleaseVulnerabilityDetailEndpoint, releaseId, vulnerabilityId);
-            HttpResponseMessage response = await RestClient.GetAsync(path);
-            if (response.IsSuccessStatusCode)
-            {
-                detailResponse = await response.Content.ReadAsAsync<HpeVulnerabilityDetail>();
-            }
-            else
-            {
-                HandleResponseError(response);
-            }
-            return detailResponse;
-        }
-        #endregion
-
-        #region Private Methods
-        private async Task VerifyLoggedIn()
-        {
-            if (String.IsNullOrEmpty(AuthToken))
-            {
-                var loginResponse = await Login();
-                if (String.IsNullOrEmpty(loginResponse))
-                {
-                    throw new HttpRequestException("Authentication failure");
-                }
-                AuthToken = loginResponse;
-                RestClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AuthToken);
-            }
-        }
-
-        private async Task<string> Login()
+        public async Task<HpeAuthResponse> Login()
         {
             ServicePointManager.ServerCertificateValidationCallback += (sender, cert, chain, sslPolicyErrors) => true;
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Ssl3 | SecurityProtocolType.Tls | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls12;
 
-            AuthToken = string.Empty;
+            HpeAuthResponse authResponse = null;
 
             var authClient = new HttpClient
             {
@@ -159,11 +92,11 @@ namespace FortifyAPI.Service
                 HttpResponseMessage response = await authClient.PostAsync(AuthEndpoint, formContent);
                 if (response.StatusCode == System.Net.HttpStatusCode.OK)
                 {
-                    var authResponse = await response.Content.ReadAsAsync<HpeAuthResponse>();
-                    AuthToken = authResponse.access_token;
+                    AuthResponse = await response.Content.ReadAsAsync<HpeAuthResponse>();
+                    //AuthToken = authResponse.access_token; // Token is good for 6 hours (21600 / 60 = 360; 360 / 60 = 6)
                 }
 
-                return AuthToken;
+                return AuthResponse;
             }
             catch (Exception ex)
             {
@@ -172,15 +105,90 @@ namespace FortifyAPI.Service
             }
         }
 
-        private async Task<HpeReleasesResponse> GetReleases(string path)
+        public async Task<Release> GetLatestRelease()
         {
-            HpeReleasesResponse releaseList = null;
+            await VerifyLoggedIn();
+
+            var releases = await GetReleases(ReleasesEndpoint);
+
+            return releases.OrderByDescending(r => r.ReleaseId).FirstOrDefault();
+        }
+
+        public async Task<IList<VulnerabilityListItem>> GetCurrentVulnerabilities(int releaseId, DateTime? createdSince)
+        {
+            await VerifyLoggedIn();
+
+            var vulnerabilitiesEndpoint = String.Format(ReleaseVulnerabilitiesEndpoint, releaseId);
+
+            return await GetVulnerabilities(vulnerabilitiesEndpoint, createdSince);
+        }
+
+        public async Task<IList<VulnerabilityDetails>> GetVulnerabilityDetails(IList<VulnerabilityListItem> vulnerabilities)
+        {
+            await VerifyLoggedIn();
+
+            var details = new List<VulnerabilityDetails>();
+
+            foreach (var vulnerability in vulnerabilities)
+            {
+                var path = String.Format(ReleaseVulnerabilityDetailEndpoint, vulnerability.ReleaseId.Value, vulnerability.VulnId);
+                HttpResponseMessage response = await RestClient.GetAsync(path);
+                if (response.IsSuccessStatusCode)
+                {
+                    var content = await response.Content.ReadAsAsync<VulnerabilityDetails>();
+                    details.Add(content);
+                }
+                else
+                {
+                    HandleResponseError(response);
+                }
+            }
+
+            return details;
+        }
+
+        public async Task<VulnerabilityDetails> GetVulnerabilityDetail(int releaseId, string vulnerabilityId)
+        {
+            await VerifyLoggedIn();
+
+            VulnerabilityDetails content = null;
+            var path = String.Format(ReleaseVulnerabilityDetailEndpoint, releaseId, vulnerabilityId);
             HttpResponseMessage response = await RestClient.GetAsync(path);
             if (response.IsSuccessStatusCode)
             {
-                Task<HpeReleasesResponse> taskResult = Task<HpeReleasesResponse>.Factory.StartNew(() => response.Content.ReadAsAsync<HpeReleasesResponse>().Result);
-                var content = await response.Content.ReadAsStringAsync();
-                releaseList = Newtonsoft.Json.JsonConvert.DeserializeObject<HpeReleasesResponse>(content);
+                content = await response.Content.ReadAsAsync<VulnerabilityDetails>();
+            }
+            else
+            {
+                HandleResponseError(response);
+            }
+            return content;
+        }
+        #endregion
+
+        #region Private Methods
+        private async Task VerifyLoggedIn()
+        {
+            if (String.IsNullOrEmpty(AuthResponse?.access_token))
+            {
+                AuthResponse = await Login();
+                if (String.IsNullOrEmpty(AuthResponse.access_token))
+                {
+                    throw new HttpRequestException("Authentication failure");
+                }
+                //AuthToken = loginResponse.access_token;
+                RestClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AuthResponse.access_token);
+            }
+        }
+
+        private async Task<IList<Release>> GetReleases(string path)
+        {
+            IList<Release> releaseList = null;
+            HttpResponseMessage response = await RestClient.GetAsync(path);
+            if (response.IsSuccessStatusCode)
+            {
+                var content = await response.Content.ReadAsAsync<ReleaseListResponse>();
+                releaseList = content.Items;
             }
             else
             {
@@ -189,19 +197,20 @@ namespace FortifyAPI.Service
             return releaseList;
         }
 
-        private async Task<HpeVulnerabilitiesResponse> GetVulnerabilities(string path, DateTime? createdSince)
+        private async Task<IList<VulnerabilityListItem>> GetVulnerabilities(string path, DateTime? createdSince)
         {
-            HpeVulnerabilitiesResponse vResponse = null;
+            IList<VulnerabilityListItem> vulnerabilities = null;
             HttpResponseMessage response = await RestClient.GetAsync(path);
             if (response.IsSuccessStatusCode)
             {
-                vResponse = await response.Content.ReadAsAsync<HpeVulnerabilitiesResponse>();
+                var content = await response.Content.ReadAsAsync<GetVulnerabilitiesResponseVulnerabilityListItem>();
+                vulnerabilities = content.Items;
             }
             else
             {
                 HandleResponseError(response);
             }
-            return vResponse;
+            return vulnerabilities;
         }
 
         private async void HandleResponseError(HttpResponseMessage response)

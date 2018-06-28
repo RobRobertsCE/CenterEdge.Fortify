@@ -1,6 +1,6 @@
 ﻿namespace FortifyAPI.Model
 {
-    class HpeAuthResponse
+    public class HpeAuthResponse
     {
         public string access_token { get; set; }
         public string token_type { get; set; }
